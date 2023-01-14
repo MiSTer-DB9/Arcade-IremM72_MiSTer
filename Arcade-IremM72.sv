@@ -169,16 +169,35 @@ module emu
     // 1 - D-/TX
     // 2..6 - USR2..USR6
     // Set USER_OUT to 1 to read from USER_IN.
-    input   [6:0] USER_IN,
-    output  [6:0] USER_OUT,
+	output			USER_OSD,
+	output		[1:0] USER_MODE,
+	input		[7:0] USER_IN,
+	output		[7:0] USER_OUT,	
 
     input         OSD_STATUS
 );
 
 ///////// Default values for ports not used in this core /////////
+wire [15:0] joydb_1,joydb_2;
+wire        joydb_1ena,joydb_2ena;
+joydbmix joydbmix
+(
+  .CLK_JOY(CLK_50M),
+  .JOY_FLAG(status[63:61]),
+  .USER_IN(USER_IN),
+  .USER_OUT(USER_OUT),
+  .USER_MODE(USER_MODE),
+  .USER_OSD(USER_OSD),
+  .joydb_1ena(joydb_1ena),
+  .joydb_2ena(joydb_2ena),
+  .joydb_1(joydb_1),
+  .joydb_2(joydb_2)
+);
+wire [15:0]   joystick_0 = joydb_1ena ? {joydb_1[9],joydb_1[11]|(joydb_1[10]&joydb_1[5]),joydb_1[10],joydb_1[5:0]} : joystick_0_USB;
+wire [15:0]   joystick_1 = joydb_2ena ? {joydb_2[10],joydb_2[11]|(joydb_2[10]&joydb_2[5]),joydb_2[9],joydb_2[5:0]} : joydb_1ena ? joystick_0_USB : joystick_1_USB;
 
 assign ADC_BUS  = 'Z;
-assign USER_OUT = '1;
+//assign USER_OUT = '1;
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign CLK_VIDEO = CLK_32M;
@@ -243,6 +262,9 @@ localparam CONF_STR = {
     "P1-;",
     "P1O[20:17],Analog Video H-Pos,0,-1,-2,-3,-4,-5,-6,-7,8,7,6,5,4,3,2,1;",
 	"P1O[24:21],Analog Video V-Pos,0,-1,-2,-3,-4,-5,-6,-7,8,7,6,5,4,3,2,1;",
+	"-;",
+	"oUV,UserIO Joystick,Off,DB15,DB9MD;",
+	"oT,UserIO Players, 1 Player,2 Players;",	
     "-;",
     "O[7],OSD Pause,Off,On;",
     "O[25],Autosave Hiscores,Off,On;",
@@ -279,7 +301,7 @@ wire  [7:0] ioctl_dout;
 wire  [7:0] ioctl_din;
 wire        ioctl_wait;
 
-wire [15:0] joystick_0, joystick_1;
+wire [15:0] joystick_0_USB, joystick_1_USB;
 wire [15:0] joy = joystick_0 | joystick_1;
 
 wire [21:0] gamma_bus;
@@ -322,8 +344,9 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
     .ioctl_index(ioctl_index),
     .ioctl_wait(ioctl_wait),
 
-    .joystick_0(joystick_0),
-    .joystick_1(joystick_1),
+	.joy_raw(joydb_1[5:0] | joydb_2[5:0]),
+    .joystick_0(joystick_0_USB),
+    .joystick_1(joystick_1_USB),
     .ps2_key(ps2_key)
 );
 
