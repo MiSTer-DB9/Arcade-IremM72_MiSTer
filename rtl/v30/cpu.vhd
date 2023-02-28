@@ -46,9 +46,6 @@ entity cpu is
       cpu_halt          : out std_logic;
       cpu_irqrequest    : out std_logic;
       cpu_prefix        : out std_logic;
-      dma_active        : in  std_logic;
-      sdma_request      : in  std_logic;
-      canSpeedup        : out std_logic;
          
       bus_read          : out std_logic := '0';
       bus_write         : out std_logic := '0';
@@ -435,7 +432,6 @@ architecture arch of cpu is
 
    -- debug
    signal executeDone      : std_logic := '0';
-   signal dma_active_1     : std_logic := '0';
   
    signal testcmd          : unsigned(31 downto 0);
    signal testpcsum        : unsigned(63 downto 0);
@@ -447,8 +443,6 @@ begin
    cpu_halt       <= halt;
    cpu_irqrequest <= irqrequest;
    cpu_prefix     <= '1' when PrefixIP > 0 else '0';
-   
-   canSpeedup <= '1';
    
    Reg_f(0 ) <= regs.FlagCar;
    Reg_f(1 ) <= '1'    ;
@@ -549,6 +543,7 @@ begin
       variable jumpAddr          : unsigned(15 downto 0);
       variable bcdResultLow      : unsigned(4 downto 0);
       variable bcdResultHigh     : unsigned(4 downto 0);
+      variable wordAligned       : std_logic;
    begin
       if rising_edge(clk) then
          
@@ -637,26 +632,15 @@ begin
             
          elsif (ce_4x = '1') then
          
-            dma_active_1 <= dma_active;
-         
             if (ce = '1' and irqrequest_in = '1' and irqBlocked = '0' and cpustage = CPUSTAGE_IDLE) then
                halt <= '0';
             end if;
-            
-            if (cpu_finished = '1' and dma_active = '0' and dma_active_1 = '1') then
-               cpu_finished <= '0';
-               cpu_done     <= '1';
-            end if;
-            
-            if (dma_active = '1') then
-               delay <= 0;
-            end if;
-         
+                     
             if (ce = '1' and delay > 0) then
             
                delay <= delay - 1;
                
-               if (delay = 1 and cpu_finished = '1' and dma_active = '0') then
+               if (delay = 1 and cpu_finished = '1') then
                   cpu_finished <= '0';
                   cpu_done     <= '1';
                end if;
@@ -666,7 +650,7 @@ begin
                case (cpustage) is
                
                   when CPUSTAGE_IDLE =>
-                     if (ce = '1' and sdma_request = '0') then
+                     if (ce = '1') then
                      
                         if (irqrequest = '1') then
                            irqrequest     <= '0';
@@ -1767,7 +1751,7 @@ begin
                               bus_read         <= '0';
                               bus_write        <= '1';
                               bus_be           <= "11";
-                              bus_addr         <= resize(regs.reg_ss * 16 + regs.reg_sp - 2, 20);
+                              bus_addr         <= resize(regs.reg_ss * 16 + resize(regs.reg_sp - 2,16), 20);
                               bus_datawrite    <= pushValue;
                               prefetchAllow    <= '0';
                               cpustage         <= CPUSTAGE_CHECKDATAREADY;
@@ -1776,7 +1760,7 @@ begin
                               bus_read         <= '0';
                               bus_write        <= '1';
                               bus_be           <= "01";
-                              bus_addr         <= resize(regs.reg_ss * 16 + regs.reg_sp - 2, 20);
+                              bus_addr         <= resize(regs.reg_ss * 16 + resize(regs.reg_sp - 2,16), 20);
                               bus_datawrite    <= pushValue;
                               prefetchAllow    <= '0';
                               pushFirst        <= '0';
@@ -1786,7 +1770,7 @@ begin
                            bus_read         <= '0';
                            bus_write        <= '1';
                            bus_be           <= "01";
-                           bus_addr         <= resize(regs.reg_ss * 16 + regs.reg_sp - 1, 20);
+                           bus_addr         <= resize(regs.reg_ss * 16 + resize(regs.reg_sp - 1,16), 20);
                            bus_datawrite    <= x"00" & pushValue(15 downto 8);
                            prefetchAllow    <= '0';
                            cpustage         <= CPUSTAGE_CHECKDATAREADY;
@@ -1817,7 +1801,7 @@ begin
                         if (popFirst = '1') then
                            bus_addr         <= resize(regs.reg_ss * 16 + regs.reg_sp, 20);
                         else
-                           bus_addr         <= resize(regs.reg_ss * 16 + regs.reg_sp + 1, 20);
+                           bus_addr         <= resize(regs.reg_ss * 16 + resize(regs.reg_sp + 1, 16), 20);
                         end if;
                         prefetchAllow    <= '0';
                         
@@ -2606,6 +2590,12 @@ begin
                            end if;
                         
                         when OP_STRINGLOAD =>
+									if (opsize = 2) then
+										wordAligned := (not regs.reg_si(0));
+									else
+										wordAligned := '0';
+									end if;
+
                            if (repeat = '1' and regs.reg_cx = 0) then
                               repeat          <= '0';
                               endRepeat       := '1';
@@ -2641,13 +2631,15 @@ begin
                                  when 2 => 
                                     opstep <= 0;
                                     memFirst <= '0';
-                                    if (opsize = 1 or memFirst = '1') then 
+                                    if (wordAligned = '1') then
+                                       stringLoad(15 downto 0) <= unsigned(bus_dataread(15 downto 0));
+                                    elsif (opsize = 1 or memFirst = '1') then 
                                        stringLoad(7 downto 0) <= unsigned(bus_dataread(7 downto 0));
                                        if (opsize = 1) then stringLoad(15 downto 8) <= x"00"; end if;
                                     else
                                        stringLoad(15 downto 8) <= unsigned(bus_dataread(7 downto 0));
                                     end if;
-                                    if (opsize = 1 or memFirst = '0') then
+                                    if (opsize = 1 or memFirst = '0' or wordAligned = '1') then
                                        if (regs.FlagDir) then 
                                           regs.reg_si <= regs.reg_si - opsize;
                                        else                                 
@@ -2679,6 +2671,12 @@ begin
                            end if;
                            
                         when OP_STRINGCOMPARE =>
+									if (opsize = 2) then
+										wordAligned := (not regs.reg_di(0));
+									else
+										wordAligned := '0';
+									end if;
+									
                            if (repeat = '1' and regs.reg_cx = 0) then
                               repeat          <= '0';
                               endRepeat       := '1';
@@ -2706,13 +2704,15 @@ begin
                                  
                                  when 2 => 
                                     memFirst <= '0';
-                                    if (opsize = 1 or memFirst = '1') then 
+                                    if (wordAligned = '1') then
+                                       stringLoad2(15 downto 0) <= unsigned(bus_dataread(15 downto 0));
+                                    elsif (opsize = 1 or memFirst = '1') then 
                                        stringLoad2(7 downto 0) <= unsigned(bus_dataread(7 downto 0));
                                        if (opsize = 1) then stringLoad2(15 downto 8) <= x"00"; end if;
                                     else
                                        stringLoad2(15 downto 8) <= unsigned(bus_dataread(7 downto 0));
                                     end if;
-                                    if (opsize = 1 or memFirst = '0') then
+                                    if (opsize = 1 or memFirst = '0' or wordAligned = '1') then
                                        opstep <= 3;
                                        aluop  <= ALU_OP_CMP;
                                     else
@@ -2746,6 +2746,12 @@ begin
                            end if;
                            
                         when OP_STRINGSTORE =>
+									if (opsize = 2) then
+										wordAligned := (not regs.reg_di(0));
+									else
+										wordAligned := '0';
+									end if;
+									
                            if (repeat = '1' and regs.reg_cx = 0) then
                               repeat          <= '0';
                               endRepeat       := '1';
@@ -2763,7 +2769,11 @@ begin
                                  bus_read          <= '0';
                                  bus_write         <= '1';
                                  bus_be            <= "01";
-                                 if (memFirst = '0') then
+                                 if (wordAligned = '1') then
+                                    bus_datawrite    <= std_logic_vector(resultval(15 downto 0));
+                                    bus_addr         <= resize(regs.reg_es * 16 + regs.reg_di, 20);
+                                    bus_be           <= "11";
+                                 elsif (memFirst = '0') then
                                     bus_datawrite    <= x"00" & std_logic_vector(resultval(15 downto 8));
                                     bus_addr         <= resize(regs.reg_es * 16 + regs.reg_di + 1, 20);
                                  else
@@ -2771,7 +2781,7 @@ begin
                                     bus_addr         <= resize(regs.reg_es * 16 + regs.reg_di, 20);
                                  end if;
                                  
-                                 if (opsize = 1 or memFirst = '0') then 
+                                 if (opsize = 1 or memFirst = '0' or wordAligned = '1') then 
                                     exeDone   := '1';
                                     if (regs.FlagDir) then 
                                        regs.reg_di <= regs.reg_di - opsize;
@@ -3060,7 +3070,7 @@ begin
             case (prefetchState) is
             
                when PREFETCH_IDLE =>
-                  if (ce = '1' and prefetchCount < 14 and dma_active = '0' and sdma_request = '0') then
+                  if (ce = '1' and prefetchCount < 14) then
                      prefetchState   <= PREFETCH_READ;
                      prefetchDisturb <= '0';
                   end if;
@@ -3086,7 +3096,7 @@ begin
                
                when PREFETCH_RECEIVE =>
                   prefetchState <= PREFETCH_IDLE;
-                  if (prefetchAllow = '1' and dma_active = '0' and prefetchDisturb = '0') then
+                  if (prefetchAllow = '1' and prefetchDisturb = '0') then
                      varprefetchBuffer((PrefetchCount * 8) + 7 downto (PrefetchCount * 8)) := bus_dataread(7 downto 0);
                      if (prefetch1byte = '0') then
                         varprefetchBuffer((PrefetchCount * 8) + 15 downto (PrefetchCount * 8) + 8) := bus_dataread(15 downto 8);
