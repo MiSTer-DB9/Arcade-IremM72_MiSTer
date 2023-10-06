@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-CORE_NAME="IremM72"
+CORE_NAME="Arcade-IremM72"
 MAIN_BRANCH="main"
 COMPILATION_OUTPUT="output_files/Arcade-IremM72.rbf"
 
