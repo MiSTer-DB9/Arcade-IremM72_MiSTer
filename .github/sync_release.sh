@@ -4,7 +4,7 @@
 set -euo pipefail
 
 UPSTREAM_REPO="https://github.com/MiSTer-devel/Arcade-IremM72_MiSTer"
-CORE_NAME="IremM72"
+CORE_NAME="Arcade-IremM72"
 MAIN_BRANCH="main"
 
 echo "Fetching upstream:"
