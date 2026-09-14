@@ -310,9 +310,10 @@ always @(posedge clk_sys) begin
     end
 end
 
-`include "build_id.v" 
+`include "build_id.v"
+localparam [63:0] SS_VERSION = 64'(`BUILD_DATE);
 localparam CONF_STR = {
-    "M72;;",
+    "M72;SS3E000000:400000;",
     "-;",
     "P1,Video Settings;",
     "P1O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
@@ -337,6 +338,11 @@ localparam CONF_STR = {
     "O[7],OSD Pause,Off,On;",
     "O[25],Autosave Hiscores,Off,On;",
     "-;",
+    "O[42:41],Savestate Slot,1,2,3,4;",
+    "O[40],Autoincrement Slot,Off,On;",
+    "R[43],Save state (Alt-F1);",
+    "R[44],Restore state (F1);",
+    "-;",
     "DIP;",
     "-;",
     "P2,Debug;",
@@ -350,14 +356,31 @@ localparam CONF_STR = {
     "P2O[70],Audio Filtering,On,Off;",
     "-;",
     "T[0],Reset;",
+    "I,",
+    "Slot=DPAD|Save/Load=Start+DPAD,",
+    "Active Slot 1,",
+    "Active Slot 2,",
+    "Active Slot 3,",
+    "Active Slot 4,",
+    "Save to state 1,",
+    "Restore state 1,",
+    "Save to state 2,",
+    "Restore state 2,",
+    "Save to state 3,",
+    "Restore state 3,",
+    "Save to state 4,",
+    "Restore state 4;",
     "DEFMRA,/_Arcade/m72.mra;",
-    "V,v",`BUILD_DATE 
+    "V,v",`BUILD_DATE
 };
 
 wire        forced_scandoubler;
 wire  [1:0] buttons;
 wire [128:0] status;
 wire [10:0] ps2_key;
+
+wire        info_req;
+wire  [7:0] info_index;
 
 wire        ioctl_download;
 wire        ioctl_upload;
@@ -399,8 +422,12 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
     .video_rotated(video_rotated),
 
     .buttons(buttons),
-    .status(status),
+    .status(status[127:0]),
     .status_menumask({crop_240p, allow_crop_240p, direct_video}),
+    .status_in({status[127:43], ss_slot, status[40:0]}),
+    .status_set(ss_status_set),
+    .info_req(info_req),
+    .info(info_index),
 
     .ioctl_download(ioctl_download),
     .ioctl_upload(ioctl_upload),
@@ -695,6 +722,18 @@ end
 
 //////////////////  Arcade Buttons/Interfaces   ///////////////////////////
 
+// [MiSTer-DB9 BEGIN] - upstream's own DB15 SNAC path removed.
+// It defined a second `joy_db15` module (sys/joydb15.v already ships one)
+// and drove USER_OUT itself, which collides with the joydb wrapper's
+// `assign USER_OUT = USER_OUT_DRIVE`. DB15 pads are reached through the
+// UserIO Joystick selector instead. db15_en stays a constant 0 so the
+// start/coin chords below keep compiling and never assert, and
+// rtl/joy_db15.sv is left in the tree but unregistered.
+wire db15_en = 1'b0;
+wire [15:0] db15_raw1 = 16'd0, db15_raw2 = 16'd0;
+// [MiSTer-DB9 END]
+
+
 //Player 1
 wire m_up1      = btn_up      | joystick_0[3];
 wire m_down1    = btn_down    | joystick_0[2];
@@ -716,11 +755,11 @@ wire m_btnx2    = btn_x       | joystick_1[6];
 wire m_btny2    = btn_y       | joystick_1[7];
 
 //Start/coin
-wire m_start1   = btn_1p_start | joy[8];
-wire m_start2   = btn_2p_start | joy[10];
-wire m_coin1    = btn_coin1    | joy[9];
-wire m_coin2    = btn_coin2;
-wire m_pause    = btn_pause    | joy[11];
+wire m_start1   = btn_1p_start | joy[8]  | (db15_en & db15_raw1[10]);
+wire m_start2   = btn_2p_start | joy[12] | (db15_en & db15_raw2[10]);
+wire m_coin1    = btn_coin1    | joy[9]  | (db15_en & db15_raw1[11]);
+wire m_coin2    = btn_coin2              | (db15_en & db15_raw2[11]);
+wire m_pause    = btn_pause    | joy[10];
 
 //////////////////////////////////////////////////////////////////
 
@@ -728,7 +767,7 @@ wire [7:0] R, G, B;
 wire HBlank, VBlank, HSync, VSync, hs_core, vs_core;
 wire ce_pix;
 
-m72 m72(
+m72 #(.SS_VERSION(SS_VERSION)) m72(
     .CLK_32M(CLK_32M),
     .CLK_96M(CLK_96M),
     .ce_pix(ce_pix),
@@ -786,13 +825,18 @@ m72 m72(
     .bram_cs(bram_cs),
     .bram_wr(bram_wr),
 
-`ifdef M72_DEBUG
-    .pause_rq(system_pause | debug_stall | reconfig_pause),
-`else
     .pause_rq(system_pause | reconfig_pause),
-`endif
-    .ddr_debug_data(ddr_debug_data),
-    
+
+    .ddr(ddr_ss),
+    .ss_index(ss_slot),
+    .ss_do_save(ss_save),
+    .ss_do_restore(ss_load),
+    .ss_state_out(),
+
+    // sim-only debug taps (pruned to zero without V30_BACKDOOR)
+    .dbg_v30_regs(),
+    .sdr_cpu_code(),
+
     .en_layer_a(en_layer_a),
     .en_layer_b(en_layer_b),
     .en_sprites(en_sprites),
@@ -882,24 +926,100 @@ pause pause(
     .OSD_STATUS(OSD_STATUS)
 );
 
-`ifndef M72_DEBUG // debug uses DDR
-screen_rotate screen_rotate(.*);
-`endif
+///////////////////      SAVESTATES        //////////////////
+//
+// DDR fabric: savestates (highest priority via acquire) muxed with the
+// screen rotation framebuffer.
 
+ddr_if ddr_ss();
 
+wire ss_load, ss_save;
+wire [1:0] ss_slot;
+wire ss_status_set;
 
-ddr_debug_data_t ddr_debug_data;
-
-`ifdef M72_DEBUG
-wire debug_stall;
-ddr_debug ddr_debug(
-    .*,
-    .data(ddr_debug_data),
-    .clk(CLK_96M),
-    .reset(reset),
-    .stall(debug_stall)
+savestate_ui #(.INFO_TIMEOUT_BITS(25)) savestate_ui
+(
+    .clk            (clk_sys),
+    .ps2_key        (ps2_key[10:0]),
+    .allow_ss       (1),
+    .joySS          (joy[11]),
+    .joyRight       (joy[0]),
+    .joyLeft        (joy[1]),
+    .joyDown        (joy[2]),
+    .joyUp          (joy[3]),
+    .joyStart       (joy[8]),
+    .joyRewind      (0),
+    .rewindEnable   (0),
+    .status_slot    (status[42:41]),
+    .autoincslot    (status[40]),
+    .OSD_saveload   (status[44:43]),
+    .ss_save        (ss_save),
+    .ss_load        (ss_load),
+    .ss_info_req    (info_req),
+    .ss_info        (info_index),
+    .statusUpdate   (ss_status_set),
+    .selected_slot  (ss_slot)
 );
-`endif
+
+ddr_if ddr_host(), ddr_rotate();
+
+ddr_mux ddr_mux(
+    .clk(clk_sys),
+    .x(ddr_host),
+    .a(ddr_ss),
+    .b(ddr_rotate)
+);
+
+assign DDRAM_CLK = clk_sys;
+assign DDRAM_ADDR = ddr_host.addr[31:3];
+assign DDRAM_BE = ddr_host.byteenable;
+assign DDRAM_WE = ddr_host.write;
+assign DDRAM_RD = ddr_host.read;
+assign DDRAM_DIN = ddr_host.wdata;
+assign DDRAM_BURSTCNT = ddr_host.burstcnt;
+assign ddr_host.rdata = DDRAM_DOUT;
+assign ddr_host.rdata_ready = DDRAM_DOUT_READY;
+assign ddr_host.busy = DDRAM_BUSY;
+
+wire [28:0] rot_ddram_addr;
+
+screen_rotate screen_rotate(
+    .CLK_VIDEO(CLK_VIDEO),
+    .CE_PIXEL(CE_PIXEL),
+
+    .VGA_R(VGA_R),
+    .VGA_G(VGA_G),
+    .VGA_B(VGA_B),
+    .VGA_HS(VGA_HS),
+    .VGA_VS(VGA_VS),
+    .VGA_DE(VGA_DE),
+
+    .rotate_ccw(rotate_ccw),
+    .no_rotate(no_rotate),
+    .flip(flip),
+    .video_rotated(video_rotated),
+
+    .FB_EN(FB_EN),
+    .FB_FORMAT(FB_FORMAT),
+    .FB_WIDTH(FB_WIDTH),
+    .FB_HEIGHT(FB_HEIGHT),
+    .FB_BASE(FB_BASE),
+    .FB_STRIDE(FB_STRIDE),
+    .FB_VBL(FB_VBL),
+    .FB_LL(FB_LL),
+
+    .DDRAM_CLK(),                       // pins now driven from the mux (same clk_sys)
+    .DDRAM_BUSY(ddr_rotate.busy),
+    .DDRAM_BURSTCNT(ddr_rotate.burstcnt),
+    .DDRAM_ADDR(rot_ddram_addr),
+    .DDRAM_DIN(ddr_rotate.wdata),
+    .DDRAM_BE(ddr_rotate.byteenable),
+    .DDRAM_WE(ddr_rotate.write),
+    .DDRAM_RD(ddr_rotate.read)
+);
+
+assign ddr_rotate.addr = {rot_ddram_addr, 3'b000};
+assign ddr_rotate.acquire = 0;
 
 //HISCORE
 
